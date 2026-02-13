@@ -1,0 +1,92 @@
+# Messaging Bridges - Configuration Reference
+# Overview of all bridges, their repos, ports, volumes, and env vars
+
+stack:
+  name: messaging-bridges
+  network: messaging-bridges (bridge)
+  setup: ./setup.sh
+
+services:
+  whatsapp-bridge:
+    repo: https://github.com/orbruno/whatsapp-agent-system.git
+    runtime: Node.js 20
+    port: 3100
+    command: npm run start
+    healthcheck: GET /health
+    volumes:
+      # Named volume: 5600+ internal files, no host access needed
+      auth_info_baileys: "whatsapp_auth:/app/data/auth_info_baileys (named volume)"
+      # Bind mounts: MCP/host access needed
+      database: "./data/whatsapp/db:/app/data/db"
+      media: "./data/whatsapp/media:/app/data/media"
+    env_vars:
+      NODE_ENV: production
+      PORT: 3100
+      BRIDGE_AUTO_UPDATE: "false (set WHATSAPP_AUTO_UPDATE in .env)"
+    auth_method: "QR code pairing via container logs"
+    notes:
+      - "First run: docker logs -f whatsapp-bridge to scan QR code"
+      - "Auth session persists in named volume across restarts"
+      - "Uses tsx to run TypeScript directly (no tsc build step)"
+
+  telegram-bridge:
+    repo: https://github.com/orbruno/telegram-mcp.git
+    runtime: Python 3.11
+    port: 8081
+    command: uv run python telegram-bridge/main.py
+    healthcheck: GET /health
+    volumes:
+      session: "./data/telegram/session:/app/data/session"
+      database: "./data/telegram/db:/app/data/db"
+      media: "./data/telegram/media:/app/data/media"
+    env_vars:
+      TELEGRAM_API_ID: "required - from my.telegram.org/apps"
+      TELEGRAM_API_HASH: "required - from my.telegram.org/apps"
+      TELEGRAM_PHONE: "optional - phone with country code"
+      BRIDGE_AUTO_UPDATE: "false (set TELEGRAM_AUTO_UPDATE in .env)"
+    auth_method: "API credentials + phone verification"
+    notes:
+      - "Session file persists in bind mount for MCP access"
+      - "Uses UV package manager (not pip)"
+
+  slack-bridge:
+    repo: https://github.com/orbruno/slack-bridge.git
+    runtime: Node.js 20
+    port: 3102
+    command: npm run start
+    healthcheck: GET /health
+    volumes:
+      database: "./data/slack/db:/app/data/db"
+      media: "./data/slack/media:/app/data/media"
+    env_vars:
+      NODE_ENV: production
+      PORT: 3102
+      SLACK_BOT_TOKEN: "required - xoxb-... from api.slack.com"
+      SLACK_APP_TOKEN: "required - xapp-... (Socket Mode)"
+      SLACK_SIGNING_SECRET: "required - from app Basic Information"
+      BRIDGE_AUTO_UPDATE: "false (set SLACK_AUTO_UPDATE in .env)"
+    auth_method: "API tokens (no interactive auth)"
+    notes:
+      - "No session files needed - token-based auth"
+      - "TypeScript compiled at build time (npm run build)"
+
+data_directory:
+  structure:
+    - "data/whatsapp/db/       - SQLite databases"
+    - "data/whatsapp/media/    - Downloaded media files"
+    - "data/telegram/session/  - Telethon session file"
+    - "data/telegram/db/       - SQLite databases"
+    - "data/telegram/media/    - Downloaded media files"
+    - "data/slack/db/          - SQLite databases"
+    - "data/slack/media/       - Downloaded media files"
+  notes:
+    - "WhatsApp auth_info_baileys uses a Docker named volume (not bind mount)"
+    - "All bind mounts are relative to ./data/ for MCP host access"
+    - "SQLite DBs are accessible from host for MCP servers to read"
+
+operations:
+  start: "docker-compose up -d"
+  stop: "docker-compose down"
+  logs: "docker-compose logs -f [service]"
+  rebuild: "docker-compose up -d --build [service]"
+  update_all: "WHATSAPP_AUTO_UPDATE=true TELEGRAM_AUTO_UPDATE=true SLACK_AUTO_UPDATE=true docker-compose restart"

@@ -1,0 +1,119 @@
+# Messaging Bridges Stack
+#
+# Services: WhatsApp, Telegram, Slack
+#
+# Usage:
+#   Setup:  ./setup.sh
+#   Start:  docker-compose up -d
+#   Logs:   docker-compose logs -f [service]
+#   Stop:   docker-compose down
+
+services:
+  # ===========================================
+  # WhatsApp Bridge (Baileys + Express API)
+  # ===========================================
+  whatsapp-bridge:
+    build:
+      context: ./whatsapp-bridge
+      dockerfile: Dockerfile
+    image: whatsapp-bridge:latest
+    container_name: whatsapp-bridge
+    restart: unless-stopped
+    ports:
+      - "${WHATSAPP_PORT:-3100}:3100"
+    environment:
+      - NODE_ENV=production
+      - PORT=3100
+      - BRIDGE_AUTO_UPDATE=${WHATSAPP_AUTO_UPDATE:-false}
+      - TZ=${TIMEZONE:-America/Costa_Rica}
+    volumes:
+      # Named volume for auth_info_baileys (5600+ internal files)
+      - whatsapp_auth:/app/data/auth_info_baileys
+      # SQLite database (MCP host access needed)
+      - ./data/whatsapp/db:/app/data/db
+      # Media files
+      - ./data/whatsapp/media:/app/data/media
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3100/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - messaging-bridges
+
+  # ===========================================
+  # Telegram Bridge (Python + MCP)
+  # ===========================================
+  telegram-bridge:
+    build:
+      context: ./telegram-bridge
+      dockerfile: Dockerfile
+    image: telegram-bridge:latest
+    container_name: telegram-bridge
+    restart: unless-stopped
+    ports:
+      - "${TELEGRAM_PORT:-8081}:8081"
+    environment:
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+      - TELEGRAM_PHONE=${TELEGRAM_PHONE:-}
+      - BRIDGE_AUTO_UPDATE=${TELEGRAM_AUTO_UPDATE:-false}
+      - TZ=${TIMEZONE:-America/Costa_Rica}
+    volumes:
+      # Session file (needed for MCP host access)
+      - ./data/telegram/session:/app/data/session
+      # SQLite database
+      - ./data/telegram/db:/app/data/db
+      # Media files
+      - ./data/telegram/media:/app/data/media
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - messaging-bridges
+
+  # ===========================================
+  # Slack Bridge (Bolt.js + Express API)
+  # ===========================================
+  slack-bridge:
+    build:
+      context: ./slack-bridge
+      dockerfile: Dockerfile
+    image: slack-bridge:latest
+    container_name: slack-bridge
+    restart: unless-stopped
+    ports:
+      - "${SLACK_PORT:-3102}:3102"
+    environment:
+      - NODE_ENV=production
+      - PORT=3102
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
+      - SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}
+      - BRIDGE_AUTO_UPDATE=${SLACK_AUTO_UPDATE:-false}
+      - TZ=${TIMEZONE:-America/Costa_Rica}
+    volumes:
+      # SQLite database
+      - ./data/slack/db:/app/data/db
+      # Media files
+      - ./data/slack/media:/app/data/media
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3102/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - messaging-bridges
+
+networks:
+  messaging-bridges:
+    driver: bridge
+
+volumes:
+  whatsapp_auth:
+    name: whatsapp_auth_info
