@@ -20,7 +20,13 @@ interface WhatsAppOptions {
   readonly onSyncComplete?: () => void
 }
 
-export async function connectWhatsApp(options: WhatsAppOptions): Promise<void> {
+export type WASocket = ReturnType<typeof makeWASocket>
+
+export interface SocketHolder {
+  sock: WASocket | null
+}
+
+export async function connectWhatsApp(options: WhatsAppOptions, socketHolder?: SocketHolder): Promise<WASocket> {
   const { authPath, source, archiveWriter, qrServer, mediaDownloader, updateMediaPath, onSyncComplete } = options
   const { state, saveCreds } = await useMultiFileAuthState(authPath)
 
@@ -38,6 +44,10 @@ export async function connectWhatsApp(options: WhatsAppOptions): Promise<void> {
     keepAliveIntervalMs: 30_000,
     shouldSyncHistoryMessage: () => true,
   })
+
+  if (socketHolder) {
+    socketHolder.sock = sock
+  }
 
   let totalSyncedMessages = 0
   let totalSyncedChats = 0
@@ -67,7 +77,7 @@ export async function connectWhatsApp(options: WhatsAppOptions): Promise<void> {
       } else {
         console.log(`[WA] Disconnected (code ${statusCode}). Reconnecting in 5s...`)
         if (shouldReconnect) {
-          setTimeout(() => connectWhatsApp(options), 5000)
+          setTimeout(() => connectWhatsApp(options, socketHolder), 5000)
         }
       }
     }
@@ -215,4 +225,6 @@ export async function connectWhatsApp(options: WhatsAppOptions): Promise<void> {
       qrServer.updateStats({ totalMessages: totalSyncedMessages })
     }
   })
+
+  return sock
 }

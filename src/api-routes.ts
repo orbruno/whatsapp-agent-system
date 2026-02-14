@@ -1,5 +1,6 @@
 import type { Express, Request, Response } from 'express'
 import type Database from 'better-sqlite3'
+import type { SocketHolder } from './whatsapp.js'
 
 interface CountRow {
   readonly count: number
@@ -69,7 +70,7 @@ function parseIntParam(value: string | undefined, defaultValue: number): number 
   return Number.isNaN(parsed) ? defaultValue : parsed
 }
 
-export function createApiRoutes(app: Express, db: Database.Database): void {
+export function createApiRoutes(app: Express, db: Database.Database, socketHolder: SocketHolder): void {
   app.get('/api/chats', (req: Request, res: Response) => {
     try {
       const limit = clamp(parseIntParam(req.query.limit as string, 50), 1, 500)
@@ -244,7 +245,7 @@ export function createApiRoutes(app: Express, db: Database.Database): void {
     }
   })
 
-  app.post('/api/send', (req: Request, res: Response) => {
+  app.post('/api/send', async (req: Request, res: Response) => {
     const { jid, text } = req.body as { jid?: string; text?: string }
 
     if (!jid || !text) {
@@ -252,8 +253,23 @@ export function createApiRoutes(app: Express, db: Database.Database): void {
       return
     }
 
-    res.status(501).json({
-      error: 'Sending is not yet implemented. The sock reference must be wired to this endpoint.',
-    })
+    const { sock } = socketHolder
+    if (!sock) {
+      res.status(503).json({ error: 'WhatsApp is not connected' })
+      return
+    }
+
+    try {
+      const result = await sock.sendMessage(jid, { text })
+      res.json({
+        success: true,
+        messageId: result?.key?.id ?? null,
+        jid,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      console.error(`[SEND] Failed to send to ${jid}:`, message)
+      res.status(500).json({ error: `Failed to send message: ${message}` })
+    }
   })
 }

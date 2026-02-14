@@ -2,7 +2,7 @@ import { loadConfig } from './config.js'
 import { initDatabase, prepareStatements } from './db.js'
 import { createArchiveWriter } from './archive-writer.js'
 import { createQrServer } from './qr-server.js'
-import { connectWhatsApp } from './whatsapp.js'
+import { connectWhatsApp, type SocketHolder } from './whatsapp.js'
 import { createMediaDownloader } from './media-downloader.js'
 import { createApiRoutes } from './api-routes.js'
 
@@ -21,8 +21,6 @@ async function main() {
   const archiveWriter = createArchiveWriter(db, stmts)
   const qrServer = createQrServer(config.qrPort)
   const mediaDownloader = createMediaDownloader({ mediaDir: config.mediaPath })
-  createApiRoutes(qrServer.app, db)
-
   function printFinalStats() {
     interface StatRow { count: number }
     const messages = (db.prepare('SELECT COUNT(*) as count FROM messages').get() as StatRow).count
@@ -47,6 +45,8 @@ async function main() {
     console.log('Press Ctrl+C to stop.\n')
   }
 
+  const socketHolder: SocketHolder = { sock: null }
+
   await connectWhatsApp({
     authPath: config.authPath,
     source: 'personal',
@@ -55,7 +55,9 @@ async function main() {
     mediaDownloader,
     updateMediaPath: stmts.updateMediaPath,
     onSyncComplete: printFinalStats,
-  })
+  }, socketHolder)
+
+  createApiRoutes(qrServer.app, db, socketHolder)
 
   process.on('SIGINT', () => {
     console.log('\n[EXIT] Shutting down...')
