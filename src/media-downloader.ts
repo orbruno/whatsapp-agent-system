@@ -6,6 +6,11 @@ import {
   type WAMessage,
 } from '@whiskeysockets/baileys'
 import pino from 'pino'
+import {
+  verifySha256,
+  extractMediaCrypto,
+  downloadAndDecryptMedia,
+} from './media-crypto.js'
 
 interface MediaDownloaderOptions {
   readonly mediaDir: string
@@ -48,7 +53,31 @@ export function createMediaDownloader({ mediaDir }: MediaDownloaderOptions) {
         ? { reuploadRequest, logger }
         : undefined
 
-      const buffer = await downloadMediaMessage(msg, 'buffer', {}, ctx)
+      // Extract crypto metadata for verification
+      const crypto = extractMediaCrypto(msg.message as Record<string, unknown>)
+
+      // Step 1: Try Baileys' built-in download (streaming decrypt)
+      let buffer = await downloadMediaMessage(msg, 'buffer', {}, ctx)
+
+      // Step 2: Verify SHA256 if we have the expected hash
+      if (crypto?.fileSha256) {
+        const isValid = verifySha256(buffer as Buffer, crypto.fileSha256)
+
+        if (!isValid) {
+          console.warn(
+            `[MEDIA] SHA256 mismatch for ${messageId} — Baileys streaming decrypt produced corrupt output. Falling back to whole-buffer decryption.`,
+          )
+
+          // Step 3: Fallback — download encrypted from CDN and decrypt manually
+          buffer = await downloadAndDecryptMedia(
+            crypto.mediaKey,
+            crypto.directPath,
+            crypto.url,
+            crypto.mediaType,
+            crypto.fileSha256,
+          )
+        }
+      }
 
       if (!existsSync(chatDir)) {
         mkdirSync(chatDir, { recursive: true })
