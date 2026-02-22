@@ -55,9 +55,10 @@ async function main() {
     mediaDownloader,
     updateMediaPath: stmts.updateMediaPath,
     onSyncComplete: printFinalStats,
+    db,
   }, socketHolder)
 
-  createApiRoutes(qrServer.app, db, socketHolder)
+  createApiRoutes(qrServer.app, db, socketHolder, archiveWriter)
 
   process.on('SIGINT', () => {
     console.log('\n[EXIT] Shutting down...')

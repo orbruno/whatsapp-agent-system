@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from 'express'
 import type Database from 'better-sqlite3'
 import type { SocketHolder } from './whatsapp.js'
+import type { ArchiveWriter, ChatMetadata, ContactMetadata } from './archive-writer.js'
 
 interface CountRow {
   readonly count: number
@@ -70,7 +71,7 @@ function parseIntParam(value: string | undefined, defaultValue: number): number 
   return Number.isNaN(parsed) ? defaultValue : parsed
 }
 
-export function createApiRoutes(app: Express, db: Database.Database, socketHolder: SocketHolder): void {
+export function createApiRoutes(app: Express, db: Database.Database, socketHolder: SocketHolder, archiveWriter: ArchiveWriter): void {
   app.get('/api/chats', (req: Request, res: Response) => {
     try {
       const limit = clamp(parseIntParam(req.query.limit as string, 50), 1, 500)
@@ -113,38 +114,38 @@ export function createApiRoutes(app: Express, db: Database.Database, socketHolde
       const params: (string | number)[] = []
 
       if (chatId) {
-        conditions.push('chat_id = ?')
+        conditions.push('m.chat_id = ?')
         params.push(chatId)
       }
       if (query) {
-        conditions.push('content LIKE ?')
+        conditions.push('m.content LIKE ?')
         params.push(`%${query}%`)
       }
       if (direction && (direction === 'incoming' || direction === 'outgoing')) {
-        conditions.push('direction = ?')
+        conditions.push('m.direction = ?')
         params.push(direction)
       }
       if (before) {
         const ts = parseInt(before, 10)
         if (!Number.isNaN(ts)) {
-          conditions.push('timestamp < ?')
+          conditions.push('m.timestamp < ?')
           params.push(ts)
         }
       }
       if (after) {
         const ts = parseInt(after, 10)
         if (!Number.isNaN(ts)) {
-          conditions.push('timestamp > ?')
+          conditions.push('m.timestamp > ?')
           params.push(ts)
         }
       }
 
-      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-      const countSql = `SELECT COUNT(*) as count FROM messages ${whereClause}`
+      const mWhere = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+      const countSql = `SELECT COUNT(*) as count FROM messages m ${mWhere}`
       const total = (db.prepare(countSql).get(...params) as CountRow).count
 
       params.push(limit, offset)
-      const dataSql = `SELECT * FROM messages ${whereClause} ORDER BY timestamp DESC LIMIT ? OFFSET ?`
+      const dataSql = `SELECT m.*, c.chat_name, c.chat_type FROM messages m LEFT JOIN chats c ON m.chat_id = c.id ${mWhere} ORDER BY m.timestamp DESC LIMIT ? OFFSET ?`
       const messages = db.prepare(dataSql).all(...params) as MessageRow[]
 
       res.json({ data: messages, total, limit, offset })
@@ -198,8 +199,9 @@ export function createApiRoutes(app: Express, db: Database.Database, socketHolde
 
       if (chatId) {
         sql = `
-          SELECT m.* FROM messages_fts fts
+          SELECT m.*, c.chat_name, c.chat_type FROM messages_fts fts
           JOIN messages m ON m.rowid = fts.rowid
+          LEFT JOIN chats c ON m.chat_id = c.id
           WHERE messages_fts MATCH ? AND m.chat_id = ?
           ORDER BY m.timestamp DESC
           LIMIT ?
@@ -207,8 +209,9 @@ export function createApiRoutes(app: Express, db: Database.Database, socketHolde
         params.push(chatId, limit)
       } else {
         sql = `
-          SELECT m.* FROM messages_fts fts
+          SELECT m.*, c.chat_name, c.chat_type FROM messages_fts fts
           JOIN messages m ON m.rowid = fts.rowid
+          LEFT JOIN chats c ON m.chat_id = c.id
           WHERE messages_fts MATCH ?
           ORDER BY m.timestamp DESC
           LIMIT ?
@@ -245,6 +248,38 @@ export function createApiRoutes(app: Express, db: Database.Database, socketHolde
     }
   })
 
+  app.post('/api/labels/chat', async (req: Request, res: Response) => {
+    const { jid, labelId, action } = req.body as {
+      jid?: string
+      labelId?: string
+      action?: 'add' | 'remove'
+    }
+
+    if (!jid || !labelId) {
+      res.status(400).json({ error: 'Both "jid" and "labelId" fields are required' })
+      return
+    }
+
+    const { sock } = socketHolder
+    if (!sock) {
+      res.status(503).json({ error: 'WhatsApp is not connected' })
+      return
+    }
+
+    try {
+      if (action === 'remove') {
+        await sock.removeChatLabel(jid, labelId)
+      } else {
+        await sock.addChatLabel(jid, labelId)
+      }
+      res.json({ success: true, jid, labelId, action: action ?? 'add' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      console.error(`[LABELS] Failed to ${action ?? 'add'} label on ${jid}:`, message)
+      res.status(500).json({ error: `Failed to ${action ?? 'add'} label: ${message}` })
+    }
+  })
+
   app.post('/api/send', async (req: Request, res: Response) => {
     const { jid, text } = req.body as { jid?: string; text?: string }
 
@@ -270,6 +305,143 @@ export function createApiRoutes(app: Express, db: Database.Database, socketHolde
       const message = error instanceof Error ? error.message : 'Unknown error'
       console.error(`[SEND] Failed to send to ${jid}:`, message)
       res.status(500).json({ error: `Failed to send message: ${message}` })
+    }
+  })
+
+  app.get('/api/chats/:id', (req: Request, res: Response) => {
+    const chatId = req.params.id as string
+    try {
+      const chat = db.prepare('SELECT * FROM chats WHERE id = ?').get(chatId)
+      if (!chat) {
+        res.status(404).json({ error: 'Chat not found' })
+        return
+      }
+
+      const participantCount = (db.prepare(
+        'SELECT COUNT(*) as count FROM chat_participants WHERE chat_id = ? AND is_active = 1'
+      ).get(chatId) as CountRow).count
+
+      res.json({ data: { ...chat as ChatRow, active_participants: participantCount } })
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to get chat' })
+    }
+  })
+
+  app.get('/api/chats/:id/participants', (req: Request, res: Response) => {
+    const chatId = req.params.id as string
+    try {
+      const participants = db.prepare(`
+        SELECT cp.*, co.display_name, co.push_name, co.phone
+        FROM chat_participants cp
+        LEFT JOIN contacts co ON cp.contact_id = co.id
+        WHERE cp.chat_id = ? AND cp.is_active = 1
+        ORDER BY CASE cp.role WHEN 'superadmin' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END
+      `).all(chatId)
+
+      res.json({ data: participants })
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to get participants' })
+    }
+  })
+
+  app.get('/api/chats/:id/metadata', async (req: Request, res: Response) => {
+    const chatId = req.params.id as string
+    const { sock } = socketHolder
+    if (!sock) {
+      res.status(503).json({ error: 'WhatsApp is not connected' })
+      return
+    }
+
+    try {
+      const meta = await sock.groupMetadata(chatId)
+      const chatMeta: ChatMetadata = {
+        subject: meta.subject ?? null,
+        subjectOwner: meta.subjectOwner ?? null,
+        subjectTime: meta.subjectTime ? new Date(meta.subjectTime * 1000).toISOString() : null,
+        description: meta.desc ?? null,
+        descriptionOwner: meta.descOwner ?? null,
+        creationTime: meta.creation ? new Date(meta.creation * 1000).toISOString() : null,
+        createdBy: meta.owner ?? null,
+        restrict: meta.restrict === true,
+        announce: meta.announce === true,
+      }
+      archiveWriter.upsertChatMetadata(chatId, chatMeta)
+
+      if (meta.participants) {
+        for (const p of meta.participants) {
+          const role = p.admin === 'superadmin' ? 'superadmin' : p.admin === 'admin' ? 'admin' : 'member'
+          archiveWriter.upsertParticipant(chatId, p.id, role)
+        }
+      }
+
+      res.json({ data: meta })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      res.status(500).json({ error: `Failed to fetch group metadata: ${message}` })
+    }
+  })
+
+  app.get('/api/contacts/:id', (req: Request, res: Response) => {
+    const contactId = req.params.id as string
+    try {
+      const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(contactId)
+      if (!contact) {
+        res.status(404).json({ error: 'Contact not found' })
+        return
+      }
+      res.json({ data: contact })
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to get contact' })
+    }
+  })
+
+  app.get('/api/contacts/:id/metadata', async (req: Request, res: Response) => {
+    const contactId = req.params.id as string
+    const { sock } = socketHolder
+    if (!sock) {
+      res.status(503).json({ error: 'WhatsApp is not connected' })
+      return
+    }
+
+    try {
+      const statusResult = await sock.fetchStatus(contactId)
+      const firstStatus = Array.isArray(statusResult) ? statusResult[0] : statusResult
+      const statusText = firstStatus
+        ? (firstStatus as unknown as Record<string, unknown>).status as string | undefined ?? null
+        : null
+      let profilePicUrl: string | null = null
+      try {
+        profilePicUrl = await sock.profilePictureUrl(contactId, 'image') ?? null
+      } catch {
+        // No profile picture available
+      }
+
+      const metadata: ContactMetadata = {
+        about: statusText,
+        profilePictureUrl: profilePicUrl,
+      }
+      archiveWriter.upsertContactMetadata(contactId, metadata)
+
+      res.json({ data: { ...metadata, id: contactId } })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      res.status(500).json({ error: `Failed to fetch contact metadata: ${message}` })
+    }
+  })
+
+  app.get('/api/messages/:id/reactions', (req: Request, res: Response) => {
+    const messageId = req.params.id as string
+    try {
+      const reactions = db.prepare(`
+        SELECT mr.*, co.display_name, co.push_name
+        FROM message_reactions mr
+        LEFT JOIN contacts co ON mr.contact_id = co.id
+        WHERE mr.message_id = ?
+      `).all(messageId)
+
+      res.json({ data: reactions })
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to get reactions' })
     }
   })
 }

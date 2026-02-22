@@ -1,11 +1,11 @@
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
-  Browsers,
+  WAMessageStubType,
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import pino from 'pino'
-import type { ArchiveWriter } from './archive-writer.js'
+import type { ArchiveWriter, ChatMetadata, ContactMetadata } from './archive-writer.js'
 import type { createQrServer } from './qr-server.js'
 import type { MediaDownloader } from './media-downloader.js'
 import type Database from 'better-sqlite3'
@@ -18,6 +18,7 @@ interface WhatsAppOptions {
   readonly mediaDownloader: MediaDownloader
   readonly updateMediaPath: Database.Statement
   readonly onSyncComplete?: () => void
+  readonly db: Database.Database
 }
 
 export type WASocket = ReturnType<typeof makeWASocket>
@@ -27,7 +28,7 @@ export interface SocketHolder {
 }
 
 export async function connectWhatsApp(options: WhatsAppOptions, socketHolder?: SocketHolder): Promise<WASocket> {
-  const { authPath, source, archiveWriter, qrServer, mediaDownloader, updateMediaPath, onSyncComplete } = options
+  const { authPath, source, archiveWriter, qrServer, mediaDownloader, updateMediaPath, onSyncComplete, db } = options
   const { state, saveCreds } = await useMultiFileAuthState(authPath)
 
   const sock = makeWASocket({
@@ -87,6 +88,11 @@ export async function connectWhatsApp(options: WhatsAppOptions, socketHolder?: S
       console.log('[WA] Connected! Waiting for history sync...')
       console.log('[WA] Keep your phone on WiFi, plugged in, and WhatsApp open.')
       console.log('[WA] (This can take 5-15 minutes for large chat histories)')
+
+      // Fire-and-forget metadata enrichment
+      enrichMetadata(sock, db, archiveWriter).catch((err) => {
+        console.error('[ENRICH] Metadata enrichment failed:', err)
+      })
     }
   })
 
@@ -226,5 +232,180 @@ export async function connectWhatsApp(options: WhatsAppOptions, socketHolder?: S
     }
   })
 
+  // Metadata enrichment handlers
+  sock.ev.on('contacts.update', (updates) => {
+    for (const update of updates) {
+      if (!update.id) continue
+      const metadata: ContactMetadata = {
+        about: (update as Record<string, unknown>).status as string | undefined ?? null,
+        profilePictureUrl: (update as Record<string, unknown>).imgUrl as string | undefined ?? null,
+        isBusiness: (update as Record<string, unknown>).isBusiness === true,
+        businessName: (update as Record<string, unknown>).verifiedName as string | undefined
+          ?? (update as Record<string, unknown>).name as string | undefined ?? null,
+        verifiedName: (update as Record<string, unknown>).verifiedName as string | undefined ?? null,
+      }
+      archiveWriter.upsertContactMetadata(update.id, metadata)
+    }
+  })
+
+  sock.ev.on('chats.update', (updates) => {
+    for (const update of updates) {
+      if (!update.id) continue
+      const raw = update as Record<string, unknown>
+      const flags = {
+        archived: update.archived === true,
+        pinned: update.pinned != null,
+        muted: raw.mute != null && Number(raw.mute) > 0,
+      }
+      archiveWriter.updateChatFlags(update.id, flags)
+    }
+  })
+
+  sock.ev.on('groups.update', (updates) => {
+    for (const update of updates) {
+      if (!update.id) continue
+      const metadata: ChatMetadata = {
+        subject: update.subject ?? null,
+        subjectOwner: update.subjectOwner ?? null,
+        subjectTime: update.subjectTime ? new Date(update.subjectTime * 1000).toISOString() : null,
+        description: update.desc ?? null,
+        descriptionOwner: update.descOwner ?? null,
+        restrict: update.restrict === true,
+        announce: update.announce === true,
+      }
+      archiveWriter.upsertChatMetadata(update.id, metadata)
+    }
+  })
+
+  sock.ev.on('group-participants.update', ({ id, participants, action, author }) => {
+    for (const participant of participants) {
+      const jid = typeof participant === 'string' ? participant : (participant as { id: string }).id
+      if (action === 'add') {
+        archiveWriter.upsertParticipant(id, jid, 'member', author ?? undefined)
+      } else if (action === 'remove') {
+        archiveWriter.deactivateParticipant(id, jid)
+      } else if (action === 'promote') {
+        archiveWriter.updateParticipantRole(id, jid, 'admin')
+      } else if (action === 'demote') {
+        archiveWriter.updateParticipantRole(id, jid, 'member')
+      }
+    }
+  })
+
+  sock.ev.on('messages.update', (updates) => {
+    for (const { key, update } of updates) {
+      if (!key.id) continue
+      if (update.message) {
+        const newText = update.message.conversation
+          || update.message.extendedTextMessage?.text
+        archiveWriter.updateMessageEdited(key.id, new Date().toISOString(), newText || undefined)
+      }
+      if (update.messageStubType === WAMessageStubType.REVOKE) {
+        archiveWriter.updateMessageDeleted(key.id)
+      }
+    }
+  })
+
+  sock.ev.on('messages.reaction', (reactions) => {
+    for (const { key, reaction } of reactions) {
+      if (!key.id || !reaction.key?.participant) continue
+      archiveWriter.upsertReaction(
+        key.id,
+        reaction.key.participant,
+        reaction.text || '',
+        reaction.key.id ? new Date().toISOString() : undefined,
+      )
+    }
+  })
+
   return sock
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function enrichMetadata(
+  sock: WASocket,
+  db: Database.Database,
+  archiveWriter: ArchiveWriter,
+): Promise<void> {
+  await delay(5000)
+  console.log('[ENRICH] Starting metadata enrichment...')
+
+  // Enrich groups
+  const groups = db.prepare("SELECT id FROM chats WHERE chat_type = 'group'").all() as { id: string }[]
+  let groupsDone = 0
+
+  for (const { id } of groups) {
+    try {
+      const meta = await sock.groupMetadata(id)
+      const chatMeta: ChatMetadata = {
+        subject: meta.subject ?? null,
+        subjectOwner: meta.subjectOwner ?? null,
+        subjectTime: meta.subjectTime ? new Date(meta.subjectTime * 1000).toISOString() : null,
+        description: meta.desc ?? null,
+        descriptionOwner: meta.descOwner ?? null,
+        creationTime: meta.creation ? new Date(meta.creation * 1000).toISOString() : null,
+        createdBy: meta.owner ?? null,
+        restrict: meta.restrict === true,
+        announce: meta.announce === true,
+      }
+      archiveWriter.upsertChatMetadata(id, chatMeta)
+
+      if (meta.participants) {
+        for (const p of meta.participants) {
+          const role = p.admin === 'superadmin' ? 'superadmin' : p.admin === 'admin' ? 'admin' : 'member'
+          archiveWriter.upsertParticipant(id, p.id, role)
+        }
+      }
+
+      groupsDone++
+      if (groupsDone % 10 === 0) {
+        console.log(`[ENRICH] Groups: ${groupsDone}/${groups.length}`)
+      }
+    } catch {
+      // Group may no longer exist or we lack access
+    }
+    await delay(500)
+  }
+
+  console.log(`[ENRICH] Groups: ${groupsDone}/${groups.length} completed`)
+
+  // Enrich contacts
+  const contacts = db.prepare('SELECT id FROM contacts').all() as { id: string }[]
+  let contactsDone = 0
+
+  for (const { id } of contacts) {
+    try {
+      const statusResult = await sock.fetchStatus(id)
+      const firstStatus = Array.isArray(statusResult) ? statusResult[0] : statusResult
+      const statusText = firstStatus
+        ? (firstStatus as unknown as Record<string, unknown>).status as string | undefined ?? null
+        : null
+      let profilePicUrl: string | null = null
+      try {
+        profilePicUrl = await sock.profilePictureUrl(id, 'image') ?? null
+      } catch {
+        // No profile picture available
+      }
+
+      const metadata: ContactMetadata = {
+        about: statusText,
+        profilePictureUrl: profilePicUrl,
+      }
+      archiveWriter.upsertContactMetadata(id, metadata)
+
+      contactsDone++
+      if (contactsDone % 25 === 0) {
+        console.log(`[ENRICH] Contacts: ${contactsDone}/${contacts.length}`)
+      }
+    } catch {
+      // Contact may not exist or status unavailable
+    }
+    await delay(500)
+  }
+
+  console.log(`[ENRICH] Contacts: ${contactsDone}/${contacts.length} completed`)
+  console.log('[ENRICH] Metadata enrichment finished')
 }

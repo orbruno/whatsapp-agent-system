@@ -3,6 +3,28 @@ import type { proto } from '@whiskeysockets/baileys'
 import type { Statements } from './db.js'
 import { parseMessage } from './message-parser.js'
 
+export interface ChatMetadata {
+  readonly description?: string | null
+  readonly subject?: string | null
+  readonly subjectOwner?: string | null
+  readonly subjectTime?: string | null
+  readonly descriptionOwner?: string | null
+  readonly descriptionTime?: string | null
+  readonly creationTime?: string | null
+  readonly createdBy?: string | null
+  readonly restrict?: boolean
+  readonly announce?: boolean
+  readonly profilePictureUrl?: string | null
+}
+
+export interface ContactMetadata {
+  readonly about?: string | null
+  readonly profilePictureUrl?: string | null
+  readonly isBusiness?: boolean
+  readonly businessName?: string | null
+  readonly verifiedName?: string | null
+}
+
 export interface SyncBatch {
   readonly messages: proto.IWebMessageInfo[]
   readonly chats: any[]
@@ -53,6 +75,14 @@ export function createArchiveWriter(db: Database.Database, stmts: Statements) {
           parsed.mediaFilename,
           parsed.mediaDurationSeconds,
           JSON.stringify(msg),
+          parsed.mentions ? JSON.stringify(parsed.mentions) : null,
+          parsed.quotedMessageId,
+          parsed.quotedContent,
+          parsed.forwardScore,
+          parsed.urlPreview ? 1 : 0,
+          parsed.urlPreview?.title ?? null,
+          parsed.urlPreview?.description ?? null,
+          parsed.urlPreview?.url ?? null,
         )
         count++
       } catch (err) {
@@ -162,6 +192,14 @@ export function createArchiveWriter(db: Database.Database, stmts: Statements) {
         parsed.mediaFilename,
         parsed.mediaDurationSeconds,
         JSON.stringify(msg),
+        parsed.mentions ? JSON.stringify(parsed.mentions) : null,
+        parsed.quotedMessageId,
+        parsed.quotedContent,
+        parsed.forwardScore,
+        parsed.urlPreview ? 1 : 0,
+        parsed.urlPreview?.title ?? null,
+        parsed.urlPreview?.description ?? null,
+        parsed.urlPreview?.url ?? null,
       )
       return true
     } catch {
@@ -176,10 +214,116 @@ export function createArchiveWriter(db: Database.Database, stmts: Statements) {
     }
   }
 
+  function upsertChatMetadata(chatId: string, metadata: ChatMetadata): void {
+    try {
+      stmts.upsertChatMetadata.run(
+        metadata.description ?? null,
+        metadata.subject ?? null,
+        metadata.subjectOwner ?? null,
+        metadata.subjectTime ?? null,
+        metadata.descriptionOwner ?? null,
+        metadata.descriptionTime ?? null,
+        metadata.creationTime ?? null,
+        metadata.createdBy ?? null,
+        metadata.restrict ? 1 : 0,
+        metadata.announce ? 1 : 0,
+        metadata.profilePictureUrl ?? null,
+        chatId,
+      )
+    } catch (err) {
+      console.error(`[ARCHIVE] Error upserting chat metadata for ${chatId}:`, err)
+    }
+  }
+
+  function upsertContactMetadata(contactId: string, metadata: ContactMetadata): void {
+    try {
+      stmts.upsertContactMetadata.run(
+        metadata.about ?? null,
+        metadata.profilePictureUrl ?? null,
+        metadata.isBusiness ? 1 : 0,
+        metadata.businessName ?? null,
+        metadata.verifiedName ?? null,
+        contactId,
+      )
+    } catch (err) {
+      console.error(`[ARCHIVE] Error upserting contact metadata for ${contactId}:`, err)
+    }
+  }
+
+  function upsertParticipant(chatId: string, contactId: string, role: string, addedBy?: string): void {
+    try {
+      stmts.upsertParticipant.run(chatId, contactId, role, null, addedBy ?? null)
+    } catch (err) {
+      console.error(`[ARCHIVE] Error upserting participant ${contactId} in ${chatId}:`, err)
+    }
+  }
+
+  function deactivateParticipant(chatId: string, contactId: string): void {
+    try {
+      stmts.deactivateParticipant.run(chatId, contactId)
+    } catch (err) {
+      console.error(`[ARCHIVE] Error deactivating participant ${contactId} in ${chatId}:`, err)
+    }
+  }
+
+  function updateParticipantRole(chatId: string, contactId: string, role: string): void {
+    try {
+      stmts.updateParticipantRole.run(role, chatId, contactId)
+    } catch (err) {
+      console.error(`[ARCHIVE] Error updating role for ${contactId} in ${chatId}:`, err)
+    }
+  }
+
+  function upsertReaction(messageId: string, contactId: string, reaction: string, timestamp?: string): void {
+    try {
+      stmts.upsertReaction.run(messageId, contactId, reaction, timestamp ?? null)
+    } catch (err) {
+      console.error(`[ARCHIVE] Error upserting reaction on ${messageId}:`, err)
+    }
+  }
+
+  function updateMessageEdited(messageId: string, editedAt: string, newContent?: string): void {
+    try {
+      stmts.updateMessageEdited.run(editedAt, newContent ?? null, messageId)
+    } catch (err) {
+      console.error(`[ARCHIVE] Error updating edited message ${messageId}:`, err)
+    }
+  }
+
+  function updateMessageDeleted(messageId: string): void {
+    try {
+      stmts.updateMessageDeleted.run(messageId)
+    } catch (err) {
+      console.error(`[ARCHIVE] Error marking message ${messageId} as deleted:`, err)
+    }
+  }
+
+  function updateChatFlags(chatId: string, flags: { archived?: boolean; pinned?: boolean; muted?: boolean }): void {
+    try {
+      stmts.updateChatFlags.run(
+        flags.archived ? 1 : 0,
+        flags.pinned ? 1 : 0,
+        flags.muted ? 1 : 0,
+        chatId,
+      )
+    } catch (err) {
+      console.error(`[ARCHIVE] Error updating chat flags for ${chatId}:`, err)
+    }
+  }
+
   return {
     writeSyncBatch,
     writeLiveMessage,
     updateChatStats,
+    upsertChatMetadata,
+    upsertContactMetadata,
+    upsertParticipant,
+    deactivateParticipant,
+    updateParticipantRole,
+    upsertReaction,
+    updateMessageEdited,
+    updateMessageDeleted,
+    updateChatFlags,
   }
 }
 

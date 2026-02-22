@@ -1,5 +1,11 @@
 import type { proto } from '@whiskeysockets/baileys'
 
+export interface UrlPreview {
+  readonly title: string | null
+  readonly description: string | null
+  readonly url: string | null
+}
+
 export interface ParsedMessage {
   readonly id: string
   readonly chatId: string
@@ -15,6 +21,11 @@ export interface ParsedMessage {
   readonly mediaSizeBytes: number | null
   readonly mediaFilename: string | null
   readonly mediaDurationSeconds: number | null
+  readonly mentions: string[] | null
+  readonly quotedMessageId: string | null
+  readonly quotedContent: string | null
+  readonly forwardScore: number | null
+  readonly urlPreview: UrlPreview | null
 }
 
 function extractText(msg: proto.IWebMessageInfo): string | null {
@@ -77,21 +88,63 @@ function extractMediaInfo(msg: proto.IWebMessageInfo) {
   }
 }
 
-function extractReplyId(msg: proto.IWebMessageInfo): string | null {
-  const ctx = msg.message?.extendedTextMessage?.contextInfo
-    || msg.message?.imageMessage?.contextInfo
-    || msg.message?.videoMessage?.contextInfo
-    || msg.message?.audioMessage?.contextInfo
-    || msg.message?.documentMessage?.contextInfo
+function extractContextInfo(msg: proto.IWebMessageInfo): proto.IContextInfo | null {
+  const m = msg.message
+  if (!m) return null
 
+  return (
+    m.extendedTextMessage?.contextInfo
+    || m.imageMessage?.contextInfo
+    || m.videoMessage?.contextInfo
+    || m.audioMessage?.contextInfo
+    || m.documentMessage?.contextInfo
+    || m.stickerMessage?.contextInfo
+    || null
+  )
+}
+
+function extractReplyId(ctx: proto.IContextInfo | null): string | null {
   return ctx?.stanzaId || null
 }
 
-function isForwarded(msg: proto.IWebMessageInfo): boolean {
-  const ctx = msg.message?.extendedTextMessage?.contextInfo
-    || msg.message?.imageMessage?.contextInfo
-
+function isForwarded(ctx: proto.IContextInfo | null): boolean {
   return ctx?.isForwarded === true
+}
+
+function extractMentions(ctx: proto.IContextInfo | null): string[] | null {
+  const jids = ctx?.mentionedJid
+  if (!jids || jids.length === 0) return null
+  return [...jids]
+}
+
+function extractQuotedContent(ctx: proto.IContextInfo | null): string | null {
+  const quoted = ctx?.quotedMessage
+  if (!quoted) return null
+
+  return (
+    quoted.conversation
+    || quoted.extendedTextMessage?.text
+    || quoted.imageMessage?.caption
+    || quoted.videoMessage?.caption
+    || quoted.documentMessage?.caption
+    || null
+  )
+}
+
+function extractForwardScore(ctx: proto.IContextInfo | null): number | null {
+  const score = ctx?.forwardingScore
+  return typeof score === 'number' ? score : null
+}
+
+function extractUrlPreview(msg: proto.IWebMessageInfo): UrlPreview | null {
+  const ext = msg.message?.extendedTextMessage
+  if (!ext?.matchedText) return null
+
+  return {
+    url: ext.matchedText || null,
+    title: ext.title || null,
+    description: ext.description || null,
+  }
 }
 
 export function parseMessage(msg: proto.IWebMessageInfo): ParsedMessage | null {
@@ -105,6 +158,7 @@ export function parseMessage(msg: proto.IWebMessageInfo): ParsedMessage | null {
   const media = extractMediaInfo(msg)
   const ts = msg.messageTimestamp
   const timestamp = typeof ts === 'number' ? ts : Number(ts)
+  const ctx = extractContextInfo(msg)
 
   return {
     id,
@@ -115,11 +169,16 @@ export function parseMessage(msg: proto.IWebMessageInfo): ParsedMessage | null {
     content: extractText(msg),
     timestamp,
     senderName: msg.pushName || null,
-    replyToId: extractReplyId(msg),
-    isForwarded: isForwarded(msg),
+    replyToId: extractReplyId(ctx),
+    isForwarded: isForwarded(ctx),
     mediaMimeType: media.mime,
     mediaSizeBytes: media.size,
     mediaFilename: media.filename,
     mediaDurationSeconds: media.duration,
+    mentions: extractMentions(ctx),
+    quotedMessageId: extractReplyId(ctx),
+    quotedContent: extractQuotedContent(ctx),
+    forwardScore: extractForwardScore(ctx),
+    urlPreview: extractUrlPreview(msg),
   }
 }
