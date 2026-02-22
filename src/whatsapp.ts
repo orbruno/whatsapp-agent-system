@@ -380,9 +380,16 @@ async function enrichMetadata(
     try {
       const statusResult = await sock.fetchStatus(id)
       const firstStatus = Array.isArray(statusResult) ? statusResult[0] : statusResult
-      const statusText = firstStatus
-        ? (firstStatus as unknown as Record<string, unknown>).status as string | undefined ?? null
-        : null
+      let statusText: string | null = null
+      if (firstStatus) {
+        const raw = (firstStatus as unknown as Record<string, unknown>).status
+        if (typeof raw === 'string') {
+          statusText = raw || null
+        } else if (raw && typeof raw === 'object') {
+          const inner = (raw as Record<string, unknown>).status
+          statusText = typeof inner === 'string' ? (inner || null) : null
+        }
+      }
       let profilePicUrl: string | null = null
       try {
         profilePicUrl = await sock.profilePictureUrl(id, 'image') ?? null

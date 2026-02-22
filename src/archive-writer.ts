@@ -236,18 +236,17 @@ export function createArchiveWriter(db: Database.Database, stmts: Statements) {
   }
 
   function upsertContactMetadata(contactId: string, metadata: ContactMetadata): void {
-    const params = [
-      metadata.about ?? null,
-      metadata.profilePictureUrl ?? null,
-      metadata.isBusiness ? 1 : 0,
-      metadata.businessName ?? null,
-      metadata.verifiedName ?? null,
-      contactId,
-    ]
     try {
-      stmts.upsertContactMetadata.run(...params)
+      stmts.upsertContactMetadata.run(
+        typeof metadata.about === 'string' ? metadata.about : null,
+        typeof metadata.profilePictureUrl === 'string' ? metadata.profilePictureUrl : null,
+        metadata.isBusiness ? 1 : 0,
+        typeof metadata.businessName === 'string' ? metadata.businessName : null,
+        typeof metadata.verifiedName === 'string' ? metadata.verifiedName : null,
+        contactId,
+      )
     } catch (err) {
-      console.error(`[ARCHIVE] Error upserting contact metadata for ${contactId}:`, err, 'params:', JSON.stringify(params))
+      console.error(`[ARCHIVE] Error upserting contact metadata for ${contactId}:`, err)
     }
   }
 
