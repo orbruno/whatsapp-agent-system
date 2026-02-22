@@ -390,11 +390,13 @@ async function enrichMetadata(
         // No profile picture available
       }
 
-      const metadata: ContactMetadata = {
+      archiveWriter.upsertContactMetadata(id, {
         about: statusText,
         profilePictureUrl: profilePicUrl,
-      }
-      archiveWriter.upsertContactMetadata(id, metadata)
+        isBusiness: false,
+        businessName: null,
+        verifiedName: null,
+      })
 
       contactsDone++
       if (contactsDone % 25 === 0) {
